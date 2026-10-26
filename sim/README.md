@@ -1,58 +1,38 @@
+# Simulation & Hazard Verification Report
 
-# Verification & Architecture Report: 5-Stage Pipelined RISC Core
+Functional simulation and timing analysis of the 5-stage pipelined processor core verified in Aldec Riviera-PRO / EDA Playground.
 
-This report details the microarchitectural implementation and functional verification of a 32-bit 5-stage pipelined RISC execution processor designed in SystemVerilog. Unlike basic unpipelined or pseudo-pipelined datapaths, this core integrates synchronous boundary registers across all five stages, full EX/MEM and MEM/WB operand forwarding networks, and hardware stall/flush interlocks for load-use hazards.
+## Waveform Analysis
 
----
+![Waveform Capture](waveform_cpu.png)
 
-## Architecture Overview
+The waveform demonstrates continuous PC incrementation, active bypass selection on `forward_a` and `forward_b`, and sequential register commits at 110 ns, 130 ns, and 150 ns.
 
-The core decouples execution across 5 isolated stages separated by clocked boundary registers (`reg_if_id`, `reg_id_ex`, `reg_ex_mem`, `reg_mem_wb`):
+## Test Program & Data Dependencies
 
-1. **Instruction Fetch (`stage_fetch.sv`):** Increments the 32-bit Program Counter (`pc + 4`) and fetches aligned instructions from instruction memory. Supports synchronous stall (PC freeze) asserted by the hazard unit.
-2. **Instruction Decode (`stage_decode.sv`):** Decodes instruction fields, performs sign-extension for immediate variants, reads dual register operands asynchronously, and interfaces with the hazard detection logic.
-3. **Execute (`stage_execute.sv`):** Computes arithmetic/logical operations (`alu.sv`) and integrates 3:1 operand forwarding multiplexers controlled by the active forwarding unit.
-4. **Memory Access (`stage_memory.sv`):** Isolates data memory bus transactions from execute timing, preventing combinational critical-path stretching.
-5. **Writeback (`stage_writeback.sv`):** Multiplexes between memory load data and ALU execution results, synchronously committing data back to the register file (`register_file.sv`) on the rising clock edge.
+The test suite evaluates three back-to-back arithmetic instructions with data dependencies. Registers are initialized upon reset to their respective index (`R[i] = i`):
 
----
+- **Instr 0:** `ADD R1, R2, R5` $\rightarrow 2 + 5 = 7$ (Target: `R1`)
+- **Instr 1:** `SUB R4, R1, R3` $\rightarrow 7 - 3 = 4$ (Target: `R4`, requires `R1` forwarded from Instr 0)
+- **Instr 2:** `ADD R6, R4, R1` $\rightarrow 4 + 7 = 11$ (Target: `R6`, requires dual forward of `R4` and `R1`)
 
-## Hazard Management & Bypass Microarchitecture
+## Execution Timeline
 
-* **Synchronous Boundary Isolation:** Eliminates cumulative datapath delays by breaking the single-cycle critical path into balanced stage intervals, raising maximum attainable clock frequency ($f_{\text{max}}$).
-* **RAW Data Hazard Forwarding (`forwarding_unit.sv`):** Detects Read-After-Write register collisions between instructions in flight and steers computed operands directly from `EX/MEM` (`forward = 2'b10`) or `MEM/WB` (`forward = 2'b01`) into the ALU inputs, avoiding pipeline stalls and sustaining near 1.0 CPI on arithmetic streams.
-* **Load-Use Hazard Detection (`hazard_unit.sv`):** Identifies when an instruction depends on a pending memory read (`LW`), simultaneously halting PC advancement, freezing the `IF/ID` boundary register, and injecting a synchronous bubble (`flush`) into `ID/EX`.
+Clock period is 20 ns (50 MHz). Reset de-asserts at 25 ns, initiating instruction execution at 30 ns:
 
----
+- **30 ns – 70 ns (Fetch/Decode):** Instructions enter the pipeline consecutively on every rising edge with zero stall bubbles.
+- **70 ns – 90 ns (Instr 0 EX):** `ADD R1, R2, R5` executes, generating ALU result `7`.
+- **90 ns – 110 ns (Instr 1 EX):** `forward_a` asserts to `2'b10`, pulling `7` directly from `EX/MEM` into the ALU. `SUB` computes $7 - 3 = 4$.
+- **110 ns – 130 ns (Instr 2 EX):** Dual forwarding active. `forward_a = 2'b10` forwards `4` from `EX/MEM`, while `forward_b = 2'b01` forwards `7` from `MEM/WB`. ALU computes $4 + 7 = 11$.
+- **110 ns – 150 ns (Writeback):** `WE3` pulses high for three cycles committing values in order: `R1 <= 7` (110 ns), `R4 <= 4` (130 ns), and `R6 <= 11` (150 ns).
 
-## Functional Verification & Waveform Analysis
-
-Verification was conducted using Aldec Riviera-PRO / ModelSim (`tb/top_tb.sv`). The test sequence evaluates back-to-back dependent arithmetic instructions to stress-test adjacent and multi-stage forwarding paths:
-
-1. **Instruction 0 (`ADD R1 = R2 + R5`):** Computes $2 + 5 = 7$.
-2. **Instruction 1 (`SUB R4 = R1 - R3`):** Immediately consumes $R1$ in the consecutive cycle. The forwarding unit activates `forward_a = 2'b10`, pulling `7` directly from the `EX/MEM` boundary register to compute $7 - 3 = 4$ with zero stall cycles.
-3. **Instruction 2 (`ADD R6 = R4 + R1`):** Simultaneously requires $R4$ (from `EX/MEM`) and $R1$ (from `MEM/WB`). Dual forwarding paths steer both operands into the ALU at the exact same cycle, calculating $4 + 7 = 11$.
-
-### Verification Waveform
-
-![Simulation Waveform](waveform_proof.png)
-
-### Key Waveform Observations:
-* **Pipelined Latency vs. Throughput:** Instruction 0 fetches at $t = 30\,\text{ns}$, reaches Execute at $t = 50\,\text{ns}$, and completes Writeback at $t = 90\,\text{ns}$ (5 cycles latency). Once the pipeline is primed, instructions commit writeback on every consecutive clock edge ($t = 90\,\text{ns}, 110\,\text{ns}, 130\,\text{ns}$).
-* **Active Bypass Trace:** At $t = 70\,\text{ns}$, `forward_a` pulses to `2` (`2'b10`), proving immediate bypass of $R1$ into `alu_result_ex = 4`. At $t = 90\,\text{ns}$, `forward_b` asserts to `1` (`2'b01`), verifying multi-stage bypass from Writeback.
-* **Register Commit:** Register file probe signal `prode` updates cleanly from initial reset state (`1`) to final computed state (`7`) upon writeback commit.
-
----
-
-## Testbench Output Log
+## Testbench Output
 
 ```text
-# KERNEL: ==================================================
-# KERNEL: EDA PLAYGROUND VERIFICATION COMPLETE
-# KERNEL: R[1] = 7 (Expected: 7)
-# KERNEL: R[4] = 4 (Expected: 4) [Forwarded R1]
-# KERNEL: R[6] = 11 (Expected: 11) [Forwarded R4 & R1]
-# KERNEL: ==================================================
-# KERNEL: >>> TEST PASSED: 5-Stage Forwarding Hardware Verified! <<<
-# RUNTIME: Info: RUNTIME_0068 testbench.sv (53): $finish called.
-# KERNEL: Time: 165 ns, Iteration: 0
+==================================================
+EDA PLAYGROUND VERIFICATION COMPLETE
+R[1] = 7 (Expected: 7)
+R[4] = 4 (Expected: 4) [Forwarded R1]
+R[6] = 11 (Expected: 11) [Forwarded R4 & R1]
+==================================================
+TEST PASSED: 5-Stage Forwarding Hardware Verified
